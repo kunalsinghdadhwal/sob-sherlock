@@ -1,9 +1,13 @@
 pub mod address;
+pub mod address_reuse;
 pub mod change_detection;
 pub mod cioh;
+pub mod classifier;
 pub mod classify;
 pub mod coinbase;
 pub mod coinjoin;
 pub mod consolidation;
 pub mod fees;
 pub mod op_return;
+pub mod round_number;
+pub mod self_transfer;

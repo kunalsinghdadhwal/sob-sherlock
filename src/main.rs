@@ -100,16 +100,13 @@ fn process_block(blk_path: &str, rev_path: &str, xor_path: &str) -> Result<(), B
         );
     }
 
-    // Smoke test: run heuristics on first block to verify they work.
+    // Analyze first block with classifier to verify.
     if let (Some(block), Some(undo)) = (blocks.first(), undos.first()) {
-        let mut cioh_count = 0usize;
-        let mut change_count = 0usize;
-        let mut coinjoin_count = 0usize;
-        let mut consolidation_count = 0usize;
+        let mut class_counts = std::collections::HashMap::<&str, usize>::new();
+        let mut flagged = 0usize;
 
         for (ti, tx) in block.transactions.iter().enumerate() {
             let prevouts = if ti == 0 {
-                // Coinbase has no undo entry.
                 &[][..]
             } else if ti - 1 < undo.tx_undos.len() {
                 &undo.tx_undos[ti - 1].prevouts
@@ -117,28 +114,34 @@ fn process_block(blk_path: &str, rev_path: &str, xor_path: &str) -> Result<(), B
                 &[][..]
             };
 
-            if analysis::cioh::detect(tx).detected {
-                cioh_count += 1;
+            let h = analysis::classifier::HeuristicResults {
+                cioh: analysis::cioh::detect(tx),
+                change_detection: analysis::change_detection::detect(tx, prevouts),
+                coinjoin: analysis::coinjoin::detect(tx),
+                consolidation: analysis::consolidation::detect(tx, prevouts),
+                address_reuse: analysis::address_reuse::detect(tx, prevouts),
+                self_transfer: analysis::self_transfer::detect(tx, prevouts),
+                round_number_payment: analysis::round_number::detect(tx),
+            };
+
+            if h.any_detected() {
+                flagged += 1;
             }
-            if analysis::change_detection::detect(tx, prevouts).detected {
-                change_count += 1;
-            }
-            if analysis::coinjoin::detect(tx).detected {
-                coinjoin_count += 1;
-            }
-            if analysis::consolidation::detect(tx, prevouts).detected {
-                consolidation_count += 1;
-            }
+
+            let class = analysis::classifier::classify(tx, &h);
+            *class_counts.entry(class).or_insert(0) += 1;
         }
 
         eprintln!(
-            "  Heuristic hits (block 0, {} txs): cioh={}, change={}, coinjoin={}, consolidation={}",
+            "  Block 0 ({} txs): flagged={}",
             block.transactions.len(),
-            cioh_count,
-            change_count,
-            coinjoin_count,
-            consolidation_count,
+            flagged,
         );
+        let mut sorted: Vec<_> = class_counts.iter().collect();
+        sorted.sort_by_key(|(_, v)| std::cmp::Reverse(**v));
+        for (class, count) in &sorted {
+            eprintln!("    {}: {}", class, count);
+        }
     }
 
     // TODO: build JSON output, write to out/<blk_stem>.json
