@@ -100,9 +100,50 @@ fn process_block(blk_path: &str, rev_path: &str, xor_path: &str) -> Result<(), B
         );
     }
 
-    // TODO: run heuristics, build JSON output, write to out/<blk_stem>.json
+    // Smoke test: run heuristics on first block to verify they work.
+    if let (Some(block), Some(undo)) = (blocks.first(), undos.first()) {
+        let mut cioh_count = 0usize;
+        let mut change_count = 0usize;
+        let mut coinjoin_count = 0usize;
+        let mut consolidation_count = 0usize;
+
+        for (ti, tx) in block.transactions.iter().enumerate() {
+            let prevouts = if ti == 0 {
+                // Coinbase has no undo entry.
+                &[][..]
+            } else if ti - 1 < undo.tx_undos.len() {
+                &undo.tx_undos[ti - 1].prevouts
+            } else {
+                &[][..]
+            };
+
+            if analysis::cioh::detect(tx).detected {
+                cioh_count += 1;
+            }
+            if analysis::change_detection::detect(tx, prevouts).detected {
+                change_count += 1;
+            }
+            if analysis::coinjoin::detect(tx).detected {
+                coinjoin_count += 1;
+            }
+            if analysis::consolidation::detect(tx, prevouts).detected {
+                consolidation_count += 1;
+            }
+        }
+
+        eprintln!(
+            "  Heuristic hits (block 0, {} txs): cioh={}, change={}, coinjoin={}, consolidation={}",
+            block.transactions.len(),
+            cioh_count,
+            change_count,
+            coinjoin_count,
+            consolidation_count,
+        );
+    }
+
+    // TODO: build JSON output, write to out/<blk_stem>.json
     // TODO: generate markdown report, write to out/<blk_stem>.md
-    let _ = (blk_stem, &undos);
+    let _ = blk_stem;
 
     Ok(())
 }
