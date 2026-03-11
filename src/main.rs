@@ -1,7 +1,9 @@
 mod analysis;
 mod error;
 mod hash;
+mod output;
 mod parser;
+mod report;
 
 use std::env;
 use std::path::Path;
@@ -58,7 +60,11 @@ fn main() {
     }
 }
 
-fn process_block(blk_path: &str, rev_path: &str, xor_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn process_block(
+    blk_path: &str,
+    rev_path: &str,
+    xor_path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let xor_key = parser::xor::read_xor_key(xor_path)?;
     let blk_raw = std::fs::read(blk_path)?;
     let rev_raw = std::fs::read(rev_path)?;
@@ -78,35 +84,38 @@ fn process_block(blk_path: &str, rev_path: &str, xor_path: &str) -> Result<(), B
         .and_then(|s| s.to_str())
         .unwrap_or("block.dat");
 
-    // Verify parsing worked
     eprintln!(
         "Parsed {} blocks from {}, {} undo records",
         blocks.len(),
         blk_filename,
         undos.len()
     );
-    for (i, block) in blocks.iter().enumerate() {
+
+    let mut block_analyses = Vec::with_capacity(blocks.len());
+
+    for (bi, block) in blocks.iter().enumerate() {
+        let undo = &undos[bi];
+
         let height = if !block.transactions.is_empty() {
-            analysis::coinbase::decode_bip34_height(&block.transactions[0].inputs[0].script_sig)
+            analysis::coinbase::decode_bip34_height(
+                &block.transactions[0].inputs[0].script_sig,
+            )
         } else {
             0
         };
-        eprintln!(
-            "  Block {}: hash={}, height={}, txs={}",
-            i,
-            hash::to_display_hex(&block.header.block_hash),
-            height,
-            block.transactions.len()
-        );
-    }
 
-    // Analyze first block with classifier to verify.
-    if let (Some(block), Some(undo)) = (blocks.first(), undos.first()) {
-        let mut class_counts = std::collections::HashMap::<&str, usize>::new();
-        let mut flagged = 0usize;
+        let block_hash = hash::to_display_hex(&block.header.block_hash);
+
+        eprintln!(
+            "  Analyzing block {}: hash={}, height={}, txs={}",
+            bi, block_hash, height, block.transactions.len()
+        );
+
+        let mut ba = output::BlockAnalysis::new(block_hash, height);
 
         for (ti, tx) in block.transactions.iter().enumerate() {
-            let prevouts = if ti == 0 {
+            let is_coinbase = ti == 0;
+            let prevouts = if is_coinbase {
                 &[][..]
             } else if ti - 1 < undo.tx_undos.len() {
                 &undo.tx_undos[ti - 1].prevouts
@@ -114,6 +123,7 @@ fn process_block(blk_path: &str, rev_path: &str, xor_path: &str) -> Result<(), B
                 &[][..]
             };
 
+            // Run all heuristics.
             let h = analysis::classifier::HeuristicResults {
                 cioh: analysis::cioh::detect(tx),
                 change_detection: analysis::change_detection::detect(tx, prevouts),
@@ -124,29 +134,41 @@ fn process_block(blk_path: &str, rev_path: &str, xor_path: &str) -> Result<(), B
                 round_number_payment: analysis::round_number::detect(tx),
             };
 
-            if h.any_detected() {
-                flagged += 1;
-            }
+            let classification = analysis::classifier::classify(tx, &h);
 
-            let class = analysis::classifier::classify(tx, &h);
-            *class_counts.entry(class).or_insert(0) += 1;
+            // Compute fee rate for non-coinbase transactions.
+            let fee_rate = if !is_coinbase && !prevouts.is_empty() {
+                let fee_info = analysis::fees::compute_fees(tx, prevouts);
+                Some(fee_info.fee_rate_sat_vb)
+            } else {
+                None
+            };
+
+            // Collect output script types.
+            let output_types: Vec<&str> = tx
+                .outputs
+                .iter()
+                .map(|o| analysis::classify::classify_output(&o.script_pubkey))
+                .collect();
+
+            ba.add_tx(tx.txid.clone(), h, classification, fee_rate, &output_types);
         }
 
-        eprintln!(
-            "  Block 0 ({} txs): flagged={}",
-            block.transactions.len(),
-            flagged,
-        );
-        let mut sorted: Vec<_> = class_counts.iter().collect();
-        sorted.sort_by_key(|(_, v)| std::cmp::Reverse(**v));
-        for (class, count) in &sorted {
-            eprintln!("    {}: {}", class, count);
-        }
+        block_analyses.push(ba);
     }
 
-    // TODO: build JSON output, write to out/<blk_stem>.json
-    // TODO: generate markdown report, write to out/<blk_stem>.md
-    let _ = blk_stem;
+    // Generate markdown report (before build_report consumes block_analyses).
+    let markdown = report::generate_markdown(blk_filename, &block_analyses);
+    let md_path = format!("out/{}.md", blk_stem);
+    std::fs::write(&md_path, &markdown)?;
+    eprintln!("Wrote {}", md_path);
+
+    // Build and write JSON report.
+    let report = output::build_report(blk_filename, block_analyses);
+    let json = serde_json::to_string_pretty(&report)?;
+    let json_path = format!("out/{}.json", blk_stem);
+    std::fs::write(&json_path, &json)?;
+    eprintln!("Wrote {}", json_path);
 
     Ok(())
 }
