@@ -4,6 +4,7 @@ mod hash;
 mod output;
 mod parser;
 mod report;
+mod web;
 
 use std::env;
 use std::path::Path;
@@ -15,10 +16,21 @@ fn main() {
     if args.len() < 2 {
         let err = error::error_json(
             "INVALID_ARGS",
-            "Usage: sherlock --block <blk.dat> <rev.dat> <xor.dat>",
+            "Usage: sherlock --block <blk.dat> <rev.dat> <xor.dat> | --web [port]",
         );
         println!("{}", err);
         process::exit(1);
+    }
+
+    if args[1] == "--web" {
+        let port: u16 = args.get(2)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| {
+                env::var("PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(3000)
+            });
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+        rt.block_on(web::serve(port));
+        return;
     }
 
     if args[1] == "--block" {
